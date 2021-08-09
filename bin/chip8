@@ -1,0 +1,89 @@
+#!/usr/bin/env ruby
+
+require "bundler/setup"
+$LOAD_PATH.unshift("./lib")
+
+# Adds IO#beep
+require 'io/console'
+
+require "chip8"
+require "chip8/peripheral"
+
+CYCLES_PER_SECOND = 500
+SECONDS_PER_CYCLE = 1.0 / CYCLES_PER_SECOND
+DT_NTH_CYCLE = CYCLES_PER_SECOND / 60
+DRAW_NTH_CYCLE = CYCLES_PER_SECOND / 30
+
+HELP = <<~TXT
+  Usage: chip8 [rom]
+
+  Options:
+    --debug          Prints every instruction before executing
+    --dump-memory    Loads the rom and dumps the memory content
+TXT
+
+rom_path, *flags = ARGV
+
+unless rom_path || flags.include?("--help")
+  abort HELP
+end
+
+unless File.exist?(rom_path)
+  abort "ERROR: ROM file does not exist"
+end
+
+frame_buffer = Array.new(Chip8::SCREEN_WIDTH * Chip8::SCREEN_HEIGHT, 0)
+cpu = Chip8::CPU.new(
+  frame_buffer: frame_buffer,
+  beep: -> { $stdout.beep },
+)
+peripheral = Chip8::Peripheral.new(
+  frame_buffer: frame_buffer, 
+  keydown: cpu.method(:key_pressed), 
+  keyup: cpu.method(:key_released),
+)
+rom = File.read(rom_path, mode: "rb")
+cpu.load(rom)
+
+if flags.include?("--debug")
+  cpu.extend(Module.new do 
+    def execute_instruction
+      opcode = fetch_opcode
+      instruction, *operands = decode_opcode(opcode)
+      puts "#{opcode.to_s(16).rjust(4, "0")}: #{instruction} #{operands.join(", ")}"
+
+      super
+    end
+  end)
+end
+
+if flags.include?("--dump-memory")
+  abort cpu.memory.each_byte.each_slice(32).map { |slice|
+    slice.map { |byte| byte.to_s(16).rjust(2, "0") }.join(" ")
+  }.join("\n")
+end
+
+cycles = 0
+loop do
+  cycles += 1
+  started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  cpu.execute_instruction
+  if cycles % DT_NTH_CYCLE == 0
+    cpu.timer_interrupt
+  end 
+  peripheral.update
+  if cycles % DRAW_NTH_CYCLE == 0
+    peripheral.draw
+  end
+  ended = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  delta = ended - started
+
+  if delta < SECONDS_PER_CYCLE
+    sleep SECONDS_PER_CYCLE - delta 
+  end
+rescue Chip8::CPU::Error => error
+  puts cpu.memory.each_byte.each_slice(32).map { |slice|
+    slice.map { |byte| byte.to_s(16).rjust(2, "0") }.join(" ")
+  }.join("\n")
+  raise error
+end
